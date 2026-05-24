@@ -32,14 +32,6 @@ type CronJobSelector struct {
 	LabelSelector *metav1.LabelSelector `json:"labelSelector,omitempty"`
 }
 
-// ServeConfig configures the HTTP endpoint for the iCal feed.
-type ServeConfig struct {
-	// path overrides the HTTP endpoint path.
-	// Defaults to /feeds/{namespace}/{name}.ics
-	// +optional
-	Path string `json:"path,omitempty"`
-}
-
 // CronICalFeedSpec defines the desired state of CronICalFeed.
 type CronICalFeedSpec struct {
 	// selector specifies the criteria for selecting target CronJobs.
@@ -56,7 +48,9 @@ type CronICalFeedSpec struct {
 	// defaultDuration is the default duration for CronJob events when the
 	// cron-ical.discord.jp/avg-duration label is not set.
 	// Must be a valid Go time.Duration string (e.g. "5m", "1h30m").
+	// Negative values are not allowed.
 	// +kubebuilder:default="0s"
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$`
 	// +optional
 	DefaultDuration string `json:"defaultDuration,omitempty"`
 
@@ -65,10 +59,6 @@ type CronICalFeedSpec struct {
 	// +kubebuilder:default="UTC"
 	// +optional
 	DefaultTimeZone string `json:"defaultTimeZone,omitempty"`
-
-	// serve configures the HTTP endpoint for the iCal feed.
-	// +optional
-	Serve *ServeConfig `json:"serve,omitempty"`
 }
 
 // CronICalFeedStatus defines the observed state of CronICalFeed.
@@ -118,7 +108,7 @@ type CronICalFeed struct {
 
 	// metadata is a standard object metadata
 	// +optional
-	metav1.ObjectMeta `json:"metadata,omitzero"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
 
 	// spec defines the desired state of CronICalFeed
 	// +required
@@ -126,7 +116,7 @@ type CronICalFeed struct {
 
 	// status defines the observed state of CronICalFeed
 	// +optional
-	Status CronICalFeedStatus `json:"status,omitzero"`
+	Status CronICalFeedStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -134,7 +124,7 @@ type CronICalFeed struct {
 // CronICalFeedList contains a list of CronICalFeed
 type CronICalFeedList struct {
 	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata,omitzero"`
+	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []CronICalFeed `json:"items"`
 }
 

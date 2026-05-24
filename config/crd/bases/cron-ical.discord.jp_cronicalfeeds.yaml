@@ -63,6 +63,8 @@ spec:
                   defaultDuration is the default duration for CronJob events when the
                   cron-ical.discord.jp/avg-duration label is not set.
                   Must be a valid Go time.Duration string (e.g. "5m", "1h30m").
+                  Negative values are not allowed.
+                pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                 type: string
               defaultTimeZone:
                 default: UTC
@@ -127,15 +129,6 @@ spec:
                     items:
                       type: string
                     type: array
-                type: object
-              serve:
-                description: serve configures the HTTP endpoint for the iCal feed.
-                properties:
-                  path:
-                    description: |-
-                      path overrides the HTTP endpoint path.
-                      Defaults to /feeds/{namespace}/{name}.ics
-                    type: string
                 type: object
               window:
                 default: 7

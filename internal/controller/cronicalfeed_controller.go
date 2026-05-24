@@ -90,6 +90,10 @@ func (r *CronICalFeedReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			log.Error(err, "invalid defaultDuration, using 0s", "value", feed.Spec.DefaultDuration)
 			r.Recorder.Eventf(&feed, "Warning", "InvalidDefaultDuration",
 				"Invalid defaultDuration %q: %v, using 0s", feed.Spec.DefaultDuration, err)
+		} else if d < 0 {
+			log.Info("negative defaultDuration not allowed, using 0s", "value", feed.Spec.DefaultDuration)
+			r.Recorder.Eventf(&feed, "Warning", "InvalidDefaultDuration",
+				"Negative defaultDuration %q not allowed, using 0s", feed.Spec.DefaultDuration)
 		} else {
 			defaultDuration = d
 		}
@@ -110,6 +114,13 @@ func (r *CronICalFeedReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			ObservedGeneration: feed.Generation,
 			Reason:             "ListFailed",
 			Message:            fmt.Sprintf("Failed to list CronJobs: %v", err),
+		})
+		meta.SetStatusCondition(&feed.Status.Conditions, metav1.Condition{
+			Type:               cronicalv1alpha1.ConditionCronJobsFound,
+			Status:             metav1.ConditionUnknown,
+			ObservedGeneration: feed.Generation,
+			Reason:             "ListFailed",
+			Message:            fmt.Sprintf("Unable to determine CronJob count: %v", err),
 		})
 		if statusErr := r.Status().Update(ctx, &feed); statusErr != nil {
 			log.Error(statusErr, "failed to update status")
@@ -159,11 +170,8 @@ func (r *CronICalFeedReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			"CronJob %s/%s: %s", w.CronJobNamespace, w.CronJobName, w.Message)
 	}
 
-	// 6. Store in cache
+	// 6. Store in cache (path is always /feeds/{namespace}/{name}.ics)
 	feedPath := server.FeedPath(feed.Namespace, feed.Name)
-	if feed.Spec.Serve != nil && feed.Spec.Serve.Path != "" {
-		feedPath = feed.Spec.Serve.Path
-	}
 	r.FeedCache.Set(feedPath, []byte(result.ICalData))
 
 	// 7. Update status

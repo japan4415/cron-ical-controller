@@ -67,6 +67,12 @@ func TestParseDurationLabel(t *testing.T) {
 			wantDuration: defaultDur,
 			wantWarning:  true,
 		},
+		{
+			name:         "negative duration returns default with warning",
+			labelValue:   "-5m",
+			wantDuration: defaultDur,
+			wantWarning:  true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -312,5 +318,73 @@ func TestGenerateFeed_VCALENDAR_Properties(t *testing.T) {
 	}
 	if !strings.Contains(result.ICalData, "CALSCALE:GREGORIAN") {
 		t.Error("expected CALSCALE:GREGORIAN")
+	}
+}
+
+func TestGenerateFeed_CronMacros(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name       string
+		schedule   string
+		wantEvents bool // whether events are expected within a 7-day window
+	}{
+		{"@hourly", "@hourly", true},
+		{"@daily", "@daily", true},
+		{"@weekly", "@weekly", true},
+		// @monthly/@yearly/@annually fire beyond 7-day window from Jan 1,
+		// so no events expected, but parsing must succeed (no warnings).
+		{"@monthly", "@monthly", false},
+		{"@yearly", "@yearly", false},
+		{"@annually", "@annually", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			jobs := []CronJobInfo{
+				{
+					Name:      "macro-job",
+					Namespace: "default",
+					Schedule:  tt.schedule,
+					TimeZone:  "UTC",
+					Duration:  5 * time.Minute,
+				},
+			}
+
+			result := GenerateFeed(jobs, 7, now)
+
+			// All macros must parse without warnings
+			if len(result.Warnings) != 0 {
+				t.Errorf("expected no warnings for %s, got: %v", tt.schedule, result.Warnings)
+			}
+
+			hasEvents := strings.Contains(result.ICalData, "BEGIN:VEVENT")
+			if tt.wantEvents && !hasEvents {
+				t.Errorf("expected VEVENTs for %s macro within 7-day window", tt.schedule)
+			}
+			if !tt.wantEvents && hasEvents {
+				t.Errorf("did not expect VEVENTs for %s macro within 7-day window", tt.schedule)
+			}
+		})
+	}
+}
+
+func TestGenerateFeed_EmptyTimeZoneShowsUTC(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	jobs := []CronJobInfo{
+		{
+			Name:      "tz-empty-job",
+			Namespace: "default",
+			Schedule:  "0 12 * * *",
+			TimeZone:  "", // empty timezone
+			Duration:  5 * time.Minute,
+		},
+	}
+
+	result := GenerateFeed(jobs, 1, now)
+
+	// DESCRIPTION should show "UTC" not empty string
+	if !strings.Contains(result.ICalData, "TimeZone: UTC") {
+		t.Error("expected TimeZone: UTC in DESCRIPTION when timezone is empty")
 	}
 }

@@ -69,14 +69,18 @@ type GenerateResult struct {
 }
 
 // ParseDurationLabel parses the duration label value. If the value is empty or
-// invalid, it returns the defaultDuration and a boolean indicating whether a
-// warning should be emitted (true if the value was non-empty but invalid).
+// invalid (including negative values), it returns the defaultDuration and a
+// boolean indicating whether a warning should be emitted (true if the value
+// was non-empty but invalid/negative).
 func ParseDurationLabel(labelValue string, defaultDuration time.Duration) (time.Duration, bool) {
 	if labelValue == "" {
 		return defaultDuration, false
 	}
 	d, err := time.ParseDuration(labelValue)
 	if err != nil {
+		return defaultDuration, true
+	}
+	if d < 0 {
 		return defaultDuration, true
 	}
 	return d, false
@@ -96,7 +100,9 @@ func GenerateFeed(jobs []CronJobInfo, windowDays int, now time.Time) GenerateRes
 
 	var warnings []ParseWarning
 
-	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+	// Support both standard 5-field cron and predefined descriptors (@hourly, @daily, etc.)
+	// as Kubernetes CronJob accepts both formats.
+	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
 
 	for _, job := range jobs {
 		// Determine timezone
@@ -146,8 +152,12 @@ func GenerateFeed(jobs []CronJobInfo, windowDays int, now time.Time) GenerateRes
 			event.SetStartAt(startUTC)
 			event.SetEndAt(endUTC)
 			event.SetSummary(job.Name)
+			descTZ := job.TimeZone
+			if descTZ == "" {
+				descTZ = "UTC"
+			}
 			event.SetDescription(fmt.Sprintf("Namespace: %s\nSchedule: %s\nTimeZone: %s",
-				job.Namespace, job.Schedule, job.TimeZone))
+				job.Namespace, job.Schedule, descTZ))
 		}
 	}
 
