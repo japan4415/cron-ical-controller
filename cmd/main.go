@@ -185,10 +185,12 @@ func main() {
 	// Create feed cache shared between reconciler and HTTP server
 	feedCache := server.NewFeedCache()
 
+	//nolint:staticcheck // TODO: migrate to GetEventRecorder (events API)
+	eventRecorder := mgr.GetEventRecorderFor("cronicalfeed-controller")
 	if err := (&controller.CronICalFeedReconciler{
 		Client:    mgr.GetClient(),
 		Scheme:    mgr.GetScheme(),
-		Recorder:  mgr.GetEventRecorderFor("cronicalfeed-controller"),
+		Recorder:  eventRecorder,
 		FeedCache: feedCache,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "CronICalFeed")

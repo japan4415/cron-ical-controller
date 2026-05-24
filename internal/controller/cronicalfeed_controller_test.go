@@ -36,7 +36,6 @@ import (
 )
 
 func int32Ptr(i int32) *int32 { return &i }
-func strPtr(s string) *string { return &s }
 
 var _ = Describe("CronICalFeed Controller", func() {
 	const (

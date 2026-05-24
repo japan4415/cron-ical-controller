@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -299,14 +300,7 @@ func (r *CronICalFeedReconciler) cronJobMatchesFeed(cronJob *batchv1.CronJob, fe
 	if len(namespaces) == 0 {
 		namespaces = []string{feed.Namespace}
 	}
-	nsMatch := false
-	for _, ns := range namespaces {
-		if cronJob.Namespace == ns {
-			nsMatch = true
-			break
-		}
-	}
-	if !nsMatch {
+	if !slices.Contains(namespaces, cronJob.Namespace) {
 		return false
 	}
 

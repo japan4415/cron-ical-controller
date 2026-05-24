@@ -91,7 +91,7 @@ func TestFeedServer_HandleFeed_CachedData(t *testing.T) {
 	server.handleFeed(rec, req)
 
 	resp := rec.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected status 200, got %d", resp.StatusCode)
@@ -118,7 +118,7 @@ func TestFeedServer_HandleFeed_NotFound(t *testing.T) {
 	server.handleFeed(rec, req)
 
 	resp := rec.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("expected status 404, got %d", resp.StatusCode)
@@ -135,7 +135,7 @@ func TestFeedServer_HandleFeed_MethodNotAllowed(t *testing.T) {
 	server.handleFeed(rec, req)
 
 	resp := rec.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Errorf("expected status 405, got %d", resp.StatusCode)
