@@ -20,48 +20,99 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
-// CronICalFeedSpec defines the desired state of CronICalFeed
-type CronICalFeedSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
-
-	// foo is an example field of CronICalFeed. Edit cronicalfeed_types.go to remove/update
+// CronJobSelector defines the criteria for selecting target CronJobs.
+type CronJobSelector struct {
+	// namespaces is a list of namespaces to search for CronJobs.
+	// If empty, the CronICalFeed's own namespace is used.
 	// +optional
-	Foo *string `json:"foo,omitempty"`
+	Namespaces []string `json:"namespaces,omitempty"`
+
+	// labelSelector filters CronJobs by labels.
+	// +optional
+	LabelSelector *metav1.LabelSelector `json:"labelSelector,omitempty"`
+}
+
+// ServeConfig configures the HTTP endpoint for the iCal feed.
+type ServeConfig struct {
+	// path overrides the HTTP endpoint path.
+	// Defaults to /feeds/{namespace}/{name}.ics
+	// +optional
+	Path string `json:"path,omitempty"`
+}
+
+// CronICalFeedSpec defines the desired state of CronICalFeed.
+type CronICalFeedSpec struct {
+	// selector specifies the criteria for selecting target CronJobs.
+	// +optional
+	Selector CronJobSelector `json:"selector,omitempty"`
+
+	// window is the number of days into the future to generate iCal events for.
+	// +kubebuilder:default=7
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=90
+	// +optional
+	Window *int32 `json:"window,omitempty"`
+
+	// defaultDuration is the default duration for CronJob events when the
+	// cron-ical.discord.jp/avg-duration label is not set.
+	// Must be a valid Go time.Duration string (e.g. "5m", "1h30m").
+	// +kubebuilder:default="0s"
+	// +optional
+	DefaultDuration string `json:"defaultDuration,omitempty"`
+
+	// defaultTimeZone is the IANA timezone name to use when a CronJob does not
+	// have its .spec.timeZone field set.
+	// +kubebuilder:default="UTC"
+	// +optional
+	DefaultTimeZone string `json:"defaultTimeZone,omitempty"`
+
+	// serve configures the HTTP endpoint for the iCal feed.
+	// +optional
+	Serve *ServeConfig `json:"serve,omitempty"`
 }
 
 // CronICalFeedStatus defines the observed state of CronICalFeed.
 type CronICalFeedStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// lastGeneratedAt is the timestamp when the .ics feed was last generated.
+	// +optional
+	LastGeneratedAt *metav1.Time `json:"lastGeneratedAt,omitempty"`
 
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
+	// cronJobCount is the number of CronJobs currently matched by the selector.
+	// +optional
+	CronJobCount int32 `json:"cronJobCount,omitempty"`
 
-	// conditions represent the current state of the CronICalFeed resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
+	// feedURL is the HTTP path where this feed is served.
+	// +optional
+	FeedURL string `json:"feedURL,omitempty"`
+
+	// conditions represent the latest available observations of the CronICalFeed's state.
 	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
+	// Condition types:
+	// - "Ready": the feed is successfully generated and available for serving
+	// - "CronJobsFound": at least one target CronJob was found
 	// +listType=map
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
+// Condition type constants for CronICalFeed.
+const (
+	// ConditionReady indicates whether the feed is successfully generated and servable.
+	ConditionReady = "Ready"
+	// ConditionCronJobsFound indicates whether any target CronJobs were found.
+	ConditionCronJobsFound = "CronJobsFound"
+)
+
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="CronJobs",type=integer,JSONPath=`.status.cronJobCount`,description="Number of matched CronJobs"
+// +kubebuilder:printcolumn:name="Feed URL",type=string,JSONPath=`.status.feedURL`,description="Feed endpoint path"
+// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`,description="Whether the feed is ready"
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
-// CronICalFeed is the Schema for the cronicalfeeds API
+// CronICalFeed is the Schema for the cronicalfeeds API.
+// It exports CronJob schedules as iCalendar (.ics) feeds.
 type CronICalFeed struct {
 	metav1.TypeMeta `json:",inline"`
 

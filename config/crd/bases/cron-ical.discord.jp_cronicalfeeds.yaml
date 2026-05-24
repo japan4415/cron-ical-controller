@@ -14,10 +14,28 @@ spec:
     singular: cronicalfeed
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - description: Number of matched CronJobs
+      jsonPath: .status.cronJobCount
+      name: CronJobs
+      type: integer
+    - description: Feed endpoint path
+      jsonPath: .status.feedURL
+      name: Feed URL
+      type: string
+    - description: Whether the feed is ready
+      jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: CronICalFeed is the Schema for the cronicalfeeds API
+        description: |-
+          CronICalFeed is the Schema for the cronicalfeeds API.
+          It exports CronJob schedules as iCalendar (.ics) feeds.
         properties:
           apiVersion:
             description: |-
@@ -39,25 +57,105 @@ spec:
           spec:
             description: spec defines the desired state of CronICalFeed
             properties:
-              foo:
-                description: foo is an example field of CronICalFeed. Edit cronicalfeed_types.go
-                  to remove/update
+              defaultDuration:
+                default: 0s
+                description: |-
+                  defaultDuration is the default duration for CronJob events when the
+                  cron-ical.discord.jp/avg-duration label is not set.
+                  Must be a valid Go time.Duration string (e.g. "5m", "1h30m").
                 type: string
+              defaultTimeZone:
+                default: UTC
+                description: |-
+                  defaultTimeZone is the IANA timezone name to use when a CronJob does not
+                  have its .spec.timeZone field set.
+                type: string
+              selector:
+                description: selector specifies the criteria for selecting target
+                  CronJobs.
+                properties:
+                  labelSelector:
+                    description: labelSelector filters CronJobs by labels.
+                    properties:
+                      matchExpressions:
+                        description: matchExpressions is a list of label selector
+                          requirements. The requirements are ANDed.
+                        items:
+                          description: |-
+                            A label selector requirement is a selector that contains values, a key, and an operator that
+                            relates the key and values.
+                          properties:
+                            key:
+                              description: key is the label key that the selector
+                                applies to.
+                              type: string
+                            operator:
+                              description: |-
+                                operator represents a key's relationship to a set of values.
+                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                              type: string
+                            values:
+                              description: |-
+                                values is an array of string values. If the operator is In or NotIn,
+                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                the values array must be empty. This array is replaced during a strategic
+                                merge patch.
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          required:
+                          - key
+                          - operator
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      matchLabels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                        type: object
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  namespaces:
+                    description: |-
+                      namespaces is a list of namespaces to search for CronJobs.
+                      If empty, the CronICalFeed's own namespace is used.
+                    items:
+                      type: string
+                    type: array
+                type: object
+              serve:
+                description: serve configures the HTTP endpoint for the iCal feed.
+                properties:
+                  path:
+                    description: |-
+                      path overrides the HTTP endpoint path.
+                      Defaults to /feeds/{namespace}/{name}.ics
+                    type: string
+                type: object
+              window:
+                default: 7
+                description: window is the number of days into the future to generate
+                  iCal events for.
+                format: int32
+                maximum: 90
+                minimum: 1
+                type: integer
             type: object
           status:
             description: status defines the observed state of CronICalFeed
             properties:
               conditions:
                 description: |-
-                  conditions represent the current state of the CronICalFeed resource.
-                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
+                  conditions represent the latest available observations of the CronICalFeed's state.
 
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
-
-                  The status of each condition is one of True, False, or Unknown.
+                  Condition types:
+                  - "Ready": the feed is successfully generated and available for serving
+                  - "CronJobsFound": at least one target CronJob was found
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -116,6 +214,19 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              cronJobCount:
+                description: cronJobCount is the number of CronJobs currently matched
+                  by the selector.
+                format: int32
+                type: integer
+              feedURL:
+                description: feedURL is the HTTP path where this feed is served.
+                type: string
+              lastGeneratedAt:
+                description: lastGeneratedAt is the timestamp when the .ics feed was
+                  last generated.
+                format: date-time
+                type: string
             type: object
         required:
         - spec
