@@ -3,8 +3,10 @@ module github.com/japan4415/cron-ical-controller
 go 1.25.3
 
 require (
+	github.com/arran4/golang-ical v0.3.5
 	github.com/onsi/ginkgo/v2 v2.27.2
 	github.com/onsi/gomega v1.38.2
+	github.com/robfig/cron/v3 v3.0.1
 	k8s.io/apimachinery v0.35.0
 	k8s.io/client-go v0.35.0
 	sigs.k8s.io/controller-runtime v0.23.3

@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -41,6 +42,9 @@ const serviceAccountName = "cron-ical-controller-controller-manager"
 
 // metricsServiceName is the name of the metrics service of the project
 const metricsServiceName = "cron-ical-controller-controller-manager-metrics-service"
+
+// feedServiceName is the name of the iCal feed service of the project
+const feedServiceName = "cron-ical-controller-controller-manager-feed-service"
 
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
 const metricsRoleBindingName = "cron-ical-controller-metrics-binding"
@@ -270,15 +274,141 @@ var _ = Describe("Manager", Ordered, func() {
 
 		// +kubebuilder:scaffold:e2e-webhooks-checks
 
-		// TODO: Customize the e2e test suite with scenarios specific to your project.
-		// Consider applying sample/CR(s) and check their status and/or verifying
-		// the reconciliation by using the metrics, i.e.:
-		// metricsOutput, err := getMetricsOutput()
-		// Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl pod")
-		// Expect(metricsOutput).To(ContainSubstring(
-		//    fmt.Sprintf(`controller_runtime_reconcile_total{controller="%s",result="success"} 1`,
-		//    strings.ToLower(<Kind>),
-		// ))
+		It("should reconcile a CronICalFeed and generate a feed", func() {
+			By("creating a test CronJob")
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(`
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: e2e-test-cronjob
+  namespace: default
+  labels:
+    app: e2e-test
+    cron-ical.discord.jp/avg-duration: "15m"
+spec:
+  schedule: "0 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: test
+            image: busybox
+            command: ["echo", "hello"]
+          restartPolicy: Never
+`)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create test CronJob")
+
+			By("creating a CronICalFeed resource")
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(`
+apiVersion: cron-ical.discord.jp/v1alpha1
+kind: CronICalFeed
+metadata:
+  name: e2e-test-feed
+  namespace: default
+spec:
+  selector:
+    namespaces:
+    - default
+    labelSelector:
+      matchLabels:
+        app: e2e-test
+  window: 7
+  defaultDuration: "5m"
+  defaultTimeZone: "UTC"
+`)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create CronICalFeed")
+
+			By("waiting for the CronICalFeed to become ready")
+			verifyFeedReady := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "cronicalfeed", "e2e-test-feed",
+					"-n", "default",
+					"-o", "jsonpath={.status.conditions[?(@.type==\"Ready\")].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("True"), "CronICalFeed not yet ready")
+			}
+			Eventually(verifyFeedReady, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying the CronICalFeed status")
+			cmd = exec.Command("kubectl", "get", "cronicalfeed", "e2e-test-feed",
+				"-n", "default",
+				"-o", "jsonpath={.status.cronJobCount}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("1"), "Expected cronJobCount to be 1")
+
+			By("verifying the feed URL is set in status")
+			cmd = exec.Command("kubectl", "get", "cronicalfeed", "e2e-test-feed",
+				"-n", "default",
+				"-o", "jsonpath={.status.feedURL}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("/feeds/default/e2e-test-feed.ics"))
+
+			By("verifying the feed is accessible via HTTP from within the cluster")
+			cmd = exec.Command("kubectl", "run", "curl-feed", "--restart=Never",
+				"--namespace", namespace,
+				"--image=curlimages/curl:latest",
+				"--overrides",
+				fmt.Sprintf(`{
+					"spec": {
+						"containers": [{
+							"name": "curl",
+							"image": "curlimages/curl:latest",
+							"command": ["/bin/sh", "-c"],
+							"args": [
+								"for i in $(seq 1 30); do curl -s -o /dev/null -w '%%{http_code}' http://%s.%s.svc.cluster.local:8082/feeds/default/e2e-test-feed.ics | grep -q 200 && curl -s http://%s.%s.svc.cluster.local:8082/feeds/default/e2e-test-feed.ics && exit 0 || sleep 2; done; exit 1"
+							],
+							"securityContext": {
+								"readOnlyRootFilesystem": true,
+								"allowPrivilegeEscalation": false,
+								"capabilities": {
+									"drop": ["ALL"]
+								},
+								"runAsNonRoot": true,
+								"runAsUser": 1000,
+								"seccompProfile": {
+									"type": "RuntimeDefault"
+								}
+							}
+						}],
+						"serviceAccountName": "%s"
+					}
+				}`, feedServiceName, namespace, feedServiceName, namespace, serviceAccountName))
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create curl-feed pod")
+
+			By("waiting for the curl-feed pod to complete")
+			verifyCurlUp := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods", "curl-feed",
+					"-o", "jsonpath={.status.phase}",
+					"-n", namespace)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("Succeeded"), "curl-feed pod in wrong status")
+			}
+			Eventually(verifyCurlUp, 3*time.Minute).Should(Succeed())
+
+			By("verifying the feed content")
+			cmd = exec.Command("kubectl", "logs", "curl-feed", "-n", namespace)
+			feedOutput, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(feedOutput).To(ContainSubstring("BEGIN:VCALENDAR"))
+			Expect(feedOutput).To(ContainSubstring("SUMMARY:e2e-test-cronjob"))
+
+			By("cleaning up e2e test resources")
+			cmd = exec.Command("kubectl", "delete", "cronicalfeed", "e2e-test-feed", "-n", "default")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "cronjob", "e2e-test-cronjob", "-n", "default")
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "pod", "curl-feed", "-n", namespace)
+			_, _ = utils.Run(cmd)
+		})
 	})
 })
 
