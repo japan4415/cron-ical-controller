@@ -63,6 +63,7 @@ var _ = BeforeSuite(func() {
 	err = cronicalv1alpha1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 
+	// batch/v1 is already registered via clientgoscheme, but ensure it's available
 	// +kubebuilder:scaffold:scheme
 
 	By("bootstrapping test environment")
