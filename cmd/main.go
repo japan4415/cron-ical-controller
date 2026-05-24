@@ -37,6 +37,7 @@ import (
 
 	cronicalv1alpha1 "github.com/japan4415/cron-ical-controller/api/v1alpha1"
 	"github.com/japan4415/cron-ical-controller/internal/controller"
+	"github.com/japan4415/cron-ical-controller/internal/server"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -54,6 +55,7 @@ func init() {
 
 // nolint:gocyclo
 func main() {
+	var feedBindAddr string
 	var metricsAddr string
 	var metricsCertPath, metricsCertName, metricsCertKey string
 	var webhookCertPath, webhookCertName, webhookCertKey string
@@ -62,6 +64,8 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
+	flag.StringVar(&feedBindAddr, "feed-bind-address", server.DefaultFeedBindAddress,
+		"The address the iCal feed HTTP server binds to. Set to 0 to disable.")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -178,14 +182,27 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create feed cache shared between reconciler and HTTP server
+	feedCache := server.NewFeedCache()
+
 	if err := (&controller.CronICalFeedReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		FeedCache: feedCache,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "CronICalFeed")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
+
+	// Register feed HTTP server as a Runnable if enabled
+	if feedBindAddr != "0" {
+		feedServer := server.NewFeedServer(feedBindAddr, feedCache)
+		if err := mgr.Add(feedServer); err != nil {
+			setupLog.Error(err, "Failed to add feed server to manager")
+			os.Exit(1)
+		}
+	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "Failed to set up health check")

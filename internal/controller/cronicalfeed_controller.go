@@ -25,12 +25,14 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	cronicalv1alpha1 "github.com/japan4415/cron-ical-controller/api/v1alpha1"
+	"github.com/japan4415/cron-ical-controller/internal/server"
 )
 
 // CronICalFeedReconciler reconciles a CronICalFeed object
 type CronICalFeedReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme    *runtime.Scheme
+	FeedCache *server.FeedCache
 }
 
 // +kubebuilder:rbac:groups=cron-ical.discord.jp,resources=cronicalfeeds,verbs=get;list;watch;create;update;patch;delete
