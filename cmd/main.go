@@ -188,6 +188,7 @@ func main() {
 	if err := (&controller.CronICalFeedReconciler{
 		Client:    mgr.GetClient(),
 		Scheme:    mgr.GetScheme(),
+		Recorder:  mgr.GetEventRecorderFor("cronicalfeed-controller"),
 		FeedCache: feedCache,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "CronICalFeed")
