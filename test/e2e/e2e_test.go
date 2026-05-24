@@ -43,6 +43,9 @@ const serviceAccountName = "cron-ical-controller-controller-manager"
 // metricsServiceName is the name of the metrics service of the project
 const metricsServiceName = "cron-ical-controller-controller-manager-metrics-service"
 
+// feedServiceName is the name of the iCal feed service of the project
+const feedServiceName = "cron-ical-controller-controller-manager-feed-service"
+
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
 const metricsRoleBindingName = "cron-ical-controller-metrics-binding"
 
@@ -359,7 +362,7 @@ spec:
 							"image": "curlimages/curl:latest",
 							"command": ["/bin/sh", "-c"],
 							"args": [
-								"for i in $(seq 1 30); do curl -s -o /dev/null -w '%%{http_code}' http://cron-ical-controller-controller-manager.%s.svc.cluster.local:8082/feeds/default/e2e-test-feed.ics | grep -q 200 && curl -s http://cron-ical-controller-controller-manager.%s.svc.cluster.local:8082/feeds/default/e2e-test-feed.ics && exit 0 || sleep 2; done; exit 1"
+								"for i in $(seq 1 30); do curl -s -o /dev/null -w '%%{http_code}' http://%s.%s.svc.cluster.local:8082/feeds/default/e2e-test-feed.ics | grep -q 200 && curl -s http://%s.%s.svc.cluster.local:8082/feeds/default/e2e-test-feed.ics && exit 0 || sleep 2; done; exit 1"
 							],
 							"securityContext": {
 								"readOnlyRootFilesystem": true,
@@ -376,7 +379,7 @@ spec:
 						}],
 						"serviceAccountName": "%s"
 					}
-				}`, namespace, namespace, serviceAccountName))
+				}`, feedServiceName, namespace, feedServiceName, namespace, serviceAccountName))
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create curl-feed pod")
 
