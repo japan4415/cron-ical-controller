@@ -6,4 +6,14 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: cronicalfeed-sample
 spec:
-  # TODO(user): Add fields here
+  # Select CronJobs in the same namespace (default behavior when namespaces is omitted)
+  selector:
+    labelSelector:
+      matchLabels:
+        app: my-app
+  # Generate events for the next 14 days
+  window: 14
+  # Default event duration for CronJobs without the avg-duration label
+  defaultDuration: "5m"
+  # Default timezone when CronJob .spec.timeZone is not set
+  defaultTimeZone: "Asia/Tokyo"
