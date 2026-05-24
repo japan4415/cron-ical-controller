@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- cron-ical_v1alpha1_cronicalfeed.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

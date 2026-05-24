@@ -8,4 +8,14 @@ layout:
 - go.kubebuilder.io/v4
 projectName: cron-ical-controller
 repo: github.com/japan4415/cron-ical-controller
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: discord.jp
+  group: cron-ical
+  kind: CronICalFeed
+  path: github.com/japan4415/cron-ical-controller/api/v1alpha1
+  version: v1alpha1
 version: "3"

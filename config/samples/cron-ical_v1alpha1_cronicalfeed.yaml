@@ -1,0 +1,9 @@
+apiVersion: cron-ical.discord.jp/v1alpha1
+kind: CronICalFeed
+metadata:
+  labels:
+    app.kubernetes.io/name: cron-ical-controller
+    app.kubernetes.io/managed-by: kustomize
+  name: cronicalfeed-sample
+spec:
+  # TODO(user): Add fields here
