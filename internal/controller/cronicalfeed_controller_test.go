@@ -28,14 +28,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	cronicalv1alpha1 "github.com/japan4415/cron-ical-controller/api/v1alpha1"
 	"github.com/japan4415/cron-ical-controller/internal/ical"
 	"github.com/japan4415/cron-ical-controller/internal/server"
 )
-
-func int32Ptr(i int32) *int32 { return &i }
 
 var _ = Describe("CronICalFeed Controller", func() {
 	const (
@@ -175,7 +174,7 @@ var _ = Describe("CronICalFeed Controller", func() {
 		BeforeEach(func() {
 			createCronJob(cronJobName, "0 * * * *", nil, nil)
 			createFeed(cronicalv1alpha1.CronICalFeedSpec{
-				Window:          int32Ptr(1),
+				Window:          ptr.To[int32](1),
 				DefaultDuration: "10m",
 			})
 		})
@@ -312,7 +311,7 @@ var _ = Describe("CronICalFeed Controller", func() {
 			createCronJob("job-a", "0 6 * * *", nil, nil)
 			createCronJob("job-b", "30 12 * * *", nil, nil)
 			createFeed(cronicalv1alpha1.CronICalFeedSpec{
-				Window:          int32Ptr(7),
+				Window:          ptr.To[int32](7),
 				DefaultDuration: "30m",
 				DefaultTimeZone: "UTC",
 			})

@@ -127,7 +127,3 @@ type CronICalFeedList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []CronICalFeed `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&CronICalFeed{}, &CronICalFeedList{})
-}
