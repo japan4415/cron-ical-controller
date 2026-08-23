@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"time"
@@ -242,6 +243,55 @@ var _ = Describe("CronICalFeed Controller", func() {
 	// server validates cron expressions at admission time. This scenario is
 	// covered by internal/ical unit tests instead.
 
+	Context("When the feed event cap is exceeded", func() {
+		BeforeEach(func() {
+			// An every-minute schedule over a 7-day window yields ~10,080
+			// firings, just past MaxEventsPerFeed: the cheapest legitimate
+			// input that exercises truncation end to end.
+			createCronJob(cronJobName, "* * * * *", nil, nil)
+			createFeed(cronicalv1alpha1.CronICalFeedSpec{
+				Window:          ptr.To[int32](7),
+				DefaultDuration: "5m",
+			})
+		})
+
+		It("should stop at the cap, serve a complete calendar, and surface the truncation", func() {
+			result, err := doReconcile()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(requeueInterval))
+
+			// Status reports exactly the capped number of events.
+			var feed cronicalv1alpha1.CronICalFeed
+			Expect(k8sClient.Get(context.Background(), feedKey, &feed)).To(Succeed())
+			Expect(feed.Status.EventCount).To(Equal(int32(ical.MaxEventsPerFeed)))
+
+			// The Ready condition records the truncation.
+			readyCond := findCondition(feed.Status.Conditions, cronicalv1alpha1.ConditionReady)
+			Expect(readyCond).NotTo(BeNil())
+			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
+			Expect(readyCond.Reason).To(Equal("FeedTruncated"))
+			Expect(readyCond.Message).To(ContainSubstring("truncated"))
+
+			// A warning event notifies users watching the resource.
+			Eventually(func() bool {
+				select {
+				case event := <-recorder.Events:
+					return strings.Contains(event, "EventLimitExceeded")
+				default:
+					return false
+				}
+			}).Should(BeTrue())
+
+			// The served feed holds exactly the capped number of VEVENTs and
+			// remains well-formed (OOM safety must not corrupt output).
+			feedPath := server.FeedPath(feedNamespace, feedName)
+			data, ok := feedCache.Get(feedPath)
+			Expect(ok).To(BeTrue())
+			Expect(bytes.Count(data, []byte("BEGIN:VEVENT"))).To(Equal(ical.MaxEventsPerFeed))
+			Expect(data).To(ContainSubstring("END:VCALENDAR"))
+		})
+	})
+
 	Context("When feed is deleted", func() {
 		It("should clean up the cache", func() {
 			createFeed(cronicalv1alpha1.CronICalFeedSpec{})
@@ -431,7 +481,7 @@ var _ = Describe("CronICalFeed Controller", func() {
 			Expect(k8sClient.Get(context.Background(), feedKey, &feed)).To(Succeed())
 			Expect(feed.ResourceVersion).NotTo(Equal(resourceVersionAfterFirst))
 			Expect(feed.Status.LastGeneratedAt.Time).To(Equal(
-				lastGeneratedAfterFirst.Time.Add(requeueInterval)))
+				lastGeneratedAfterFirst.Add(requeueInterval)))
 			// Content metrics stay untouched by the clock advance.
 			Expect(feed.Status.CronJobCount).To(Equal(int32(1)))
 			Expect(feed.Status.EventCount).To(BeNumerically(">", 0))
@@ -494,7 +544,7 @@ var _ = Describe("CronICalFeed Controller", func() {
 			managerReconciler := &CronICalFeedReconciler{
 				Client:    mgr.GetClient(),
 				Scheme:    mgr.GetScheme(),
-				Recorder:  mgr.GetEventRecorderFor("cronicalfeed-controller-test"),
+				Recorder:  mgr.GetEventRecorderFor("cronicalfeed-controller-test"), //nolint:staticcheck // TODO: migrate to GetEventRecorder (events API)
 				FeedCache: managerCache,
 			}
 			Expect(managerReconciler.SetupWithManager(mgr)).To(Succeed())

@@ -87,15 +87,22 @@ spec:
             port: 8081
           initialDelaySeconds: 5
           periodSeconds: 10
-        # TODO(user): Configure the resources accordingly based on the project requirements.
-        # More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+        # Memory sizing is derived from the structural worst case after the
+        # feed event cap (MaxEventsPerFeed=10000, see README.md "Sizing
+        # guidelines"): feed cache budget 64 MiB + generation working memory
+        # ~25 MB per reconcile + controller-runtime/client-go baseline.
+        # GOMEMLIMIT sits at ~90% of the container limit so the GC ramps up
+        # before the OOM killer threshold is reached.
         resources:
           limits:
             cpu: 500m
-            memory: 128Mi
+            memory: 256Mi
           requests:
             cpu: 10m
-            memory: 64Mi
+            memory: 128Mi
+        env:
+        - name: GOMEMLIMIT
+          value: "230MiB"
         volumeMounts: []
       volumes: []
       serviceAccountName: controller-manager

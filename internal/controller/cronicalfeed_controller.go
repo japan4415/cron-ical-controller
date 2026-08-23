@@ -197,9 +197,31 @@ func (r *CronICalFeedReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			"CronJob %s/%s: %s", w.CronJobNamespace, w.CronJobName, w.Message)
 	}
 
-	// 6. Store in cache (path is always /feeds/{namespace}/{name}.ics)
+	// The event cap protects the manager from OOMKill on legitimate but very
+	// dense feeds (e.g. every-minute schedules over a 90-day window). Make
+	// the truncation observable instead of silently serving partial data.
+	if result.Truncated {
+		log.Info("Feed generation truncated at event limit",
+			"eventCount", result.EventCount,
+			"maxEventsPerFeed", ical.MaxEventsPerFeed,
+			"windowDays", windowDays,
+		)
+		r.Recorder.Eventf(&feed, "Warning", "EventLimitExceeded",
+			"Feed generation truncated at %d events (limit %d); some firings within the %d-day window are missing. Reduce schedule frequency or window to include all events.",
+			result.EventCount, ical.MaxEventsPerFeed, windowDays)
+	}
+
+	// 6. Store in cache (path is always /feeds/{namespace}/{name}.ics).
+	// The cache takes ownership of result.ICalData; no copy is needed.
 	feedPath := server.FeedPath(feed.Namespace, feed.Name)
-	r.FeedCache.Set(feedPath, []byte(result.ICalData))
+	if !r.FeedCache.Set(feedPath, result.ICalData) {
+		// Only possible when a single feed exceeds the entire cache budget;
+		// unreachable with MaxEventsPerFeed in place (~2.4 MB max feed vs a
+		// 64 MiB budget), so log loudly rather than serve nothing silently.
+		log.Error(nil, "Failed to cache feed: payload exceeds cache byte limit",
+			"bytes", len(result.ICalData),
+			"path", feedPath)
+	}
 
 	// 7. Update status only when the observed state meaningfully changed.
 	// An unconditional update would emit a watch event for our own object on
@@ -230,13 +252,23 @@ func (r *CronICalFeedReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		Reason:             "Checked",
 		Message:            cronJobsFoundMsg,
 	})
+	readyReason := "FeedGenerated"
+	readyMessage := fmt.Sprintf("Feed generated with %d event(s) from %d CronJob(s)",
+		result.EventCount, len(cronJobs))
+	if result.Truncated {
+		// Record the truncation in the Ready condition message so that the
+		// partially-served feed is visible without digging through events.
+		readyReason = "FeedTruncated"
+		readyMessage = fmt.Sprintf(
+			"Feed truncated at %d event(s) (limit %d) from %d CronJob(s); some firings within the window are missing",
+			result.EventCount, ical.MaxEventsPerFeed, len(cronJobs))
+	}
 	meta.SetStatusCondition(&feed.Status.Conditions, metav1.Condition{
 		Type:               cronicalv1alpha1.ConditionReady,
 		Status:             metav1.ConditionTrue,
 		ObservedGeneration: feed.Generation,
-		Reason:             "FeedGenerated",
-		Message: fmt.Sprintf("Feed generated with %d event(s) from %d CronJob(s)",
-			result.EventCount, len(cronJobs)),
+		Reason:             readyReason,
+		Message:            readyMessage,
 	})
 
 	// Degraded flags the (defensive) case where CronJobs matched but none of
