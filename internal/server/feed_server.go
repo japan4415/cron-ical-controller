@@ -39,27 +39,114 @@ const (
 
 	// shutdownTimeout is the time to wait for graceful shutdown.
 	shutdownTimeout = 5 * time.Second
+
+	// DefaultCacheMaxBytes bounds the total size of all cached feeds (64 MiB).
+	//
+	// Rationale: with MaxEventsPerFeed=10000 a single feed serializes to at
+	// most ~2.4 MB (~240 B/event), so 64 MiB holds ~26 worst-case feeds or
+	// hundreds of typically-sized ones (a default window=7d hourly feed is a
+	// few tens of KB). It stays well below the manager's memory limit,
+	// leaving room for generation-time working memory and the controller
+	// runtime baseline. See README.md ("Sizing guidelines") for details.
+	DefaultCacheMaxBytes = 64 << 20 // 64 MiB
 )
 
 // FeedCache provides thread-safe access to cached iCal feed data.
 // Keys are in the format "/feeds/{namespace}/{name}.ics".
+// The total size of cached data is bounded by a byte budget; inserting beyond
+// it evicts the least-recently-updated entries (see Set).
 type FeedCache struct {
-	mu    sync.RWMutex
-	feeds map[string][]byte
+	mu         sync.RWMutex
+	feeds      map[string][]byte
+	updated    map[string]time.Time
+	totalBytes int
+	maxBytes   int
+
+	// nowFunc returns the time used to order entries for eviction. When nil,
+	// time.Now is used. Injected in tests to make eviction order deterministic.
+	nowFunc func() time.Time
 }
 
-// NewFeedCache creates a new empty feed cache.
+// now returns the current eviction-order timestamp, honoring an injectable
+// clock for tests.
+func (c *FeedCache) now() time.Time {
+	if c.nowFunc != nil {
+		return c.nowFunc()
+	}
+	return time.Now()
+}
+
+// NewFeedCache creates a new empty feed cache with the default total size
+// limit (DefaultCacheMaxBytes).
 func NewFeedCache() *FeedCache {
+	return NewFeedCacheWithLimit(DefaultCacheMaxBytes)
+}
+
+// NewFeedCacheWithLimit creates a new empty feed cache that keeps at most
+// maxBytes bytes of feed data in total.
+func NewFeedCacheWithLimit(maxBytes int) *FeedCache {
 	return &FeedCache{
-		feeds: make(map[string][]byte),
+		feeds:    make(map[string][]byte),
+		updated:  make(map[string]time.Time),
+		maxBytes: maxBytes,
 	}
 }
 
-// Set stores iCal data for the given path.
-func (c *FeedCache) Set(path string, data []byte) {
+// Set stores iCal data for the given path, taking ownership of the slice.
+//
+// If storing data would exceed the cache's byte budget, other entries are
+// evicted oldest-update-first until it fits. This policy was chosen because:
+//   - feeds are only rewritten by reconciliation, so the least-recently-
+//     updated entry is the least likely to be regenerated again soon;
+//     recently regenerated feeds are exactly the ones still receiving traffic
+//   - the number of entries equals the number of CronICalFeed objects (small),
+//     so an O(n) scan per eviction is negligible compared to serving cost
+//   - it is deterministic and dependency-free (no LRU list bookkeeping)
+//
+// Ties on update time are broken by lexicographic path order so behavior is
+// fully deterministic even within one clock tick.
+//
+// A single payload larger than the entire budget can never fit; it is refused
+// (returning false) rather than served half-cached. Callers surface this via
+// logs/events; the stale previous entry (if any) is dropped as well so that a
+// too-large feed fails visibly instead of silently serving outdated content.
+func (c *FeedCache) Set(path string, data []byte) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	now := c.now()
+
+	// Charge for the entry being replaced before evaluating the budget.
+	if old, ok := c.feeds[path]; ok {
+		c.totalBytes -= len(old)
+		delete(c.feeds, path)
+		delete(c.updated, path)
+	}
+
+	if len(data) > c.maxBytes {
+		return false
+	}
+
+	for c.totalBytes+len(data) > c.maxBytes {
+		victim := ""
+		var oldest time.Time
+		for p, ts := range c.updated {
+			if victim == "" || ts.Before(oldest) || (ts.Equal(oldest) && p < victim) {
+				victim, oldest = p, ts
+			}
+		}
+		if victim == "" {
+			break
+		}
+		c.totalBytes -= len(c.feeds[victim])
+		delete(c.feeds, victim)
+		delete(c.updated, victim)
+	}
+
 	c.feeds[path] = data
+	c.updated[path] = now
+	c.totalBytes += len(data)
+	return true
 }
 
 // Get retrieves cached iCal data for the given path.
@@ -75,7 +162,18 @@ func (c *FeedCache) Get(path string) ([]byte, bool) {
 func (c *FeedCache) Delete(path string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.feeds, path)
+	if old, ok := c.feeds[path]; ok {
+		c.totalBytes -= len(old)
+		delete(c.feeds, path)
+		delete(c.updated, path)
+	}
+}
+
+// TotalBytes returns the total number of bytes currently cached.
+func (c *FeedCache) TotalBytes() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.totalBytes
 }
 
 // FeedPath returns the canonical feed path for the given namespace and name.

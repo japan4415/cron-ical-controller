@@ -17,6 +17,7 @@ limitations under the License.
 package ical
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 	"time"
@@ -96,11 +97,16 @@ func TestGenerateFeed_NoCronJobs(t *testing.T) {
 		t.Errorf("expected no warnings, got %d", len(result.Warnings))
 	}
 
+	data := string(result.ICalData)
+
 	// Should produce a valid VCALENDAR with no VEVENT
-	if !strings.Contains(result.ICalData, "BEGIN:VCALENDAR") {
+	if !strings.Contains(data, "BEGIN:VCALENDAR") {
 		t.Error("expected VCALENDAR in output")
 	}
-	if strings.Contains(result.ICalData, "BEGIN:VEVENT") {
+	if !strings.Contains(data, "END:VCALENDAR") {
+		t.Error("expected terminated VCALENDAR in output")
+	}
+	if strings.Contains(data, "BEGIN:VEVENT") {
 		t.Error("expected no VEVENT for empty job list")
 	}
 }
@@ -124,16 +130,22 @@ func TestGenerateFeed_SingleCronJob(t *testing.T) {
 		t.Errorf("expected no warnings, got %d: %v", len(result.Warnings), result.Warnings)
 	}
 
+	data := string(result.ICalData)
+
 	// 24 hours, each hour => 24 events (hour 0 is after now, so 1:00-23:00 = 23, plus 0:00 next day... wait)
 	// now = 2026-01-01 00:00:00 UTC, window ends 2026-01-02 00:00:00 UTC
 	// Next after 00:00 is 01:00, 02:00, ..., 23:00 = 23 events
-	eventCount := strings.Count(result.ICalData, "BEGIN:VEVENT")
+	eventCount := strings.Count(data, "BEGIN:VEVENT")
 	if eventCount != 23 {
 		t.Errorf("expected 23 events, got %d", eventCount)
 	}
 
+	if result.Truncated {
+		t.Error("expected no truncation below the event cap")
+	}
+
 	// Check SUMMARY contains job name
-	if !strings.Contains(result.ICalData, "SUMMARY:test-job") {
+	if !strings.Contains(data, "SUMMARY:test-job") {
 		t.Error("expected SUMMARY:test-job in output")
 	}
 }
@@ -190,7 +202,7 @@ func TestGenerateFeed_InvalidTimeZone(t *testing.T) {
 	}
 
 	// Should still generate events (using UTC fallback)
-	if !strings.Contains(result.ICalData, "BEGIN:VEVENT") {
+	if !strings.Contains(string(result.ICalData), "BEGIN:VEVENT") {
 		t.Error("expected events even with invalid timezone (UTC fallback)")
 	}
 }
@@ -218,7 +230,7 @@ func TestGenerateFeed_TimeZoneConversion(t *testing.T) {
 	// But since now==00:00 UTC Jan 1, Next() should return the next occurrence after now,
 	// which for "0 9 * * *" in Asia/Tokyo from 2026-01-01 09:00:00 JST...
 	// now in JST is 2026-01-01 09:00:00, so next is 2026-01-02 09:00:00 JST = 2026-01-02 00:00:00 UTC
-	eventCount := strings.Count(result.ICalData, "BEGIN:VEVENT")
+	eventCount := strings.Count(string(result.ICalData), "BEGIN:VEVENT")
 	if eventCount != 1 {
 		t.Errorf("expected 1 event (next day), got %d", eventCount)
 	}
@@ -249,18 +261,20 @@ func TestGenerateFeed_MultipleJobs(t *testing.T) {
 		t.Errorf("expected no warnings, got %d", len(result.Warnings))
 	}
 
+	data := string(result.ICalData)
+
 	// daily-job: 12:00 = 1 event
 	// hourly-job: 01:00-23:00 = 23 events
 	// Total = 24
-	eventCount := strings.Count(result.ICalData, "BEGIN:VEVENT")
+	eventCount := strings.Count(data, "BEGIN:VEVENT")
 	if eventCount != 24 {
 		t.Errorf("expected 24 events, got %d", eventCount)
 	}
 
-	if !strings.Contains(result.ICalData, "SUMMARY:daily-job") {
+	if !strings.Contains(data, "SUMMARY:daily-job") {
 		t.Error("expected SUMMARY:daily-job")
 	}
-	if !strings.Contains(result.ICalData, "SUMMARY:hourly-job") {
+	if !strings.Contains(data, "SUMMARY:hourly-job") {
 		t.Error("expected SUMMARY:hourly-job")
 	}
 }
@@ -280,7 +294,7 @@ func TestGenerateFeed_ZeroDuration(t *testing.T) {
 	result := GenerateFeed(jobs, 1, now)
 
 	// DTSTART and DTEND should be the same
-	if !strings.Contains(result.ICalData, "BEGIN:VEVENT") {
+	if !strings.Contains(string(result.ICalData), "BEGIN:VEVENT") {
 		t.Error("expected VEVENT even with zero duration")
 	}
 }
@@ -301,7 +315,7 @@ func TestGenerateFeed_UIDFormat(t *testing.T) {
 
 	// UID format: namespace-name-DTSTART(RFC3339)@cron-ical.discord.jp
 	expectedUID := "myns-uid-test-2026-01-01T12:00:00Z@cron-ical.discord.jp"
-	if !strings.Contains(result.ICalData, expectedUID) {
+	if !strings.Contains(string(result.ICalData), expectedUID) {
 		t.Errorf("expected UID %q in output, got:\n%s", expectedUID, result.ICalData)
 	}
 }
@@ -310,13 +324,15 @@ func TestGenerateFeed_VCALENDAR_Properties(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	result := GenerateFeed(nil, 7, now)
 
-	if !strings.Contains(result.ICalData, "VERSION:2.0") {
+	data := string(result.ICalData)
+
+	if !strings.Contains(data, "VERSION:2.0") {
 		t.Error("expected VERSION:2.0")
 	}
-	if !strings.Contains(result.ICalData, "PRODID:"+productID) {
+	if !strings.Contains(data, "PRODID:"+productID) {
 		t.Error("expected PRODID:" + productID)
 	}
-	if !strings.Contains(result.ICalData, "CALSCALE:GREGORIAN") {
+	if !strings.Contains(data, "CALSCALE:GREGORIAN") {
 		t.Error("expected CALSCALE:GREGORIAN")
 	}
 }
@@ -358,7 +374,7 @@ func TestGenerateFeed_CronMacros(t *testing.T) {
 				t.Errorf("expected no warnings for %s, got: %v", tt.schedule, result.Warnings)
 			}
 
-			hasEvents := strings.Contains(result.ICalData, "BEGIN:VEVENT")
+			hasEvents := strings.Contains(string(result.ICalData), "BEGIN:VEVENT")
 			if tt.wantEvents && !hasEvents {
 				t.Errorf("expected VEVENTs for %s macro within 7-day window", tt.schedule)
 			}
@@ -384,7 +400,158 @@ func TestGenerateFeed_EmptyTimeZoneShowsUTC(t *testing.T) {
 	result := GenerateFeed(jobs, 1, now)
 
 	// DESCRIPTION should show "UTC" not empty string
-	if !strings.Contains(result.ICalData, "TimeZone: UTC") {
+	if !strings.Contains(string(result.ICalData), "TimeZone: UTC") {
 		t.Error("expected TimeZone: UTC in DESCRIPTION when timezone is empty")
+	}
+}
+
+func TestGenerateFeed_DeterministicOutput(t *testing.T) {
+	// The controller relies on byte-identical output for equal inputs to skip
+	// no-op status updates. Two generations within the same (truncated)
+	// window must therefore produce exactly the same bytes.
+	now := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
+	jobs := []CronJobInfo{
+		{
+			Name:      "det-job",
+			Namespace: "default",
+			Schedule:  "0 * * * *",
+			TimeZone:  "Asia/Tokyo",
+			Duration:  30 * time.Minute,
+		},
+	}
+
+	first := GenerateFeed(jobs, 7, now)
+	second := GenerateFeed(jobs, 7, now)
+
+	if !bytes.Equal(first.ICalData, second.ICalData) {
+		t.Errorf("expected identical output for identical inputs,\nfirst:\n%s\nsecond:\n%s", first.ICalData, second.ICalData)
+	}
+
+	data := string(first.ICalData)
+
+	// DTSTAMP must reflect the passed-in generation time (truncated by the
+	// caller), not wall-clock time.
+	wantDTStamp := "DTSTAMP:20260101T030000Z"
+	if !strings.Contains(data, wantDTStamp) {
+		t.Errorf("expected %q in output, got:\n%s", wantDTStamp, data)
+	}
+
+	// Advancing the generation window to the next hour must change DTSTAMP,
+	// proving that the timestamp tracks the (rounded) generation time.
+	nextWindow := GenerateFeed(jobs, 7, now.Add(time.Hour))
+	if bytes.Equal(nextWindow.ICalData, first.ICalData) {
+		t.Error("expected output to change when the generation window advances")
+	}
+}
+
+func TestGenerateFeed_EventCount(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name         string
+		jobs         []CronJobInfo
+		windowDays   int
+		wantWarnings int
+	}{
+		{
+			name:       "no jobs yields zero events",
+			jobs:       nil,
+			windowDays: 7,
+		},
+		{
+			name: "single hourly job over one day",
+			jobs: []CronJobInfo{
+				{Name: "hourly-job", Namespace: "default", Schedule: "0 * * * *", Duration: 5 * time.Minute},
+			},
+			windowDays: 1,
+		},
+		{
+			name: "unparseable schedule yields zero events with warning",
+			jobs: []CronJobInfo{
+				{Name: "bad-job", Namespace: "default", Schedule: "invalid cron", Duration: 5 * time.Minute},
+			},
+			windowDays:   7,
+			wantWarnings: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := GenerateFeed(tt.jobs, tt.windowDays, now)
+
+			actualEvents := strings.Count(string(result.ICalData), "BEGIN:VEVENT")
+			if result.EventCount != actualEvents {
+				t.Errorf("EventCount = %d, but ICalData contains %d VEVENTs", result.EventCount, actualEvents)
+			}
+			if len(result.Warnings) != tt.wantWarnings {
+				t.Errorf("expected %d warnings, got %d", tt.wantWarnings, len(result.Warnings))
+			}
+			if result.Truncated {
+				t.Error("expected no truncation below the event cap")
+			}
+		})
+	}
+}
+
+func TestGenerateFeed_EventCapTruncates(t *testing.T) {
+	// An every-minute schedule over a 7-day window yields ~10,080 firings,
+	// just past the cap: the cheapest realistic way to exercise truncation.
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	jobs := []CronJobInfo{
+		{Name: "every-minute", Namespace: "default", Schedule: "* * * * *", Duration: time.Minute},
+	}
+
+	result := GenerateFeed(jobs, 7, now)
+
+	if !result.Truncated {
+		t.Fatal("expected Truncated=true when enumeration exceeds MaxEventsPerFeed")
+	}
+	if result.EventCount != MaxEventsPerFeed {
+		t.Errorf("EventCount = %d, want %d (the cap)", result.EventCount, MaxEventsPerFeed)
+	}
+
+	data := string(result.ICalData)
+	if got := strings.Count(data, "BEGIN:VEVENT"); got != MaxEventsPerFeed {
+		t.Errorf("serialized VEVENT count = %d, want %d", got, MaxEventsPerFeed)
+	}
+
+	// The truncated calendar must still be well-formed.
+	if !strings.Contains(data, "BEGIN:VCALENDAR") || !strings.Contains(data, "END:VCALENDAR") {
+		t.Error("expected a complete VCALENDAR even when truncated")
+	}
+}
+
+func TestGenerateFeed_EventCapDropsLaterJobsEntirely(t *testing.T) {
+	// The first job alone exhausts the cap; jobs after it must not contribute
+	// any events (enumeration stops globally, keeping output deterministic).
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	jobs := []CronJobInfo{
+		{Name: "dense-job", Namespace: "default", Schedule: "* * * * *", Duration: time.Minute},
+		{Name: "hourly-job", Namespace: "default", Schedule: "0 * * * *", Duration: 5 * time.Minute},
+	}
+
+	result := GenerateFeed(jobs, 7, now)
+
+	if !result.Truncated {
+		t.Fatal("expected Truncated=true")
+	}
+	if strings.Contains(string(result.ICalData), "SUMMARY:hourly-job") {
+		t.Error("expected jobs after the cap to be dropped entirely")
+	}
+}
+
+func TestGenerateFeed_EventCapTruncationIsDeterministic(t *testing.T) {
+	// Truncated output feeds into the same cache/status comparison as normal
+	// output, so it must remain byte-identical for identical inputs.
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	jobs := []CronJobInfo{
+		{Name: "every-minute", Namespace: "default", Schedule: "* * * * *", Duration: time.Minute},
+	}
+
+	first := GenerateFeed(jobs, 7, now)
+	second := GenerateFeed(jobs, 7, now)
+
+	if !bytes.Equal(first.ICalData, second.ICalData) {
+		t.Error("expected byte-identical truncated output for identical inputs")
 	}
 }

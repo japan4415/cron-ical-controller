@@ -17,6 +17,7 @@ limitations under the License.
 package ical
 
 import (
+	"bytes"
 	"fmt"
 	"time"
 
@@ -33,6 +34,21 @@ const (
 
 	// productID identifies this software in the VCALENDAR PRODID property.
 	productID = "-//cron-ical-controller//EN"
+
+	// MaxEventsPerFeed caps the number of VEVENTs a single feed may contain.
+	//
+	// Rationale (measured with golang-ical v0.3.5 / robfig cron v3.0.1):
+	// a serialized VEVENT costs roughly 240 B, so the cap bounds a feed at
+	// ~2.4 MB and the in-memory enumeration peak (~1.5-2 KB per event while
+	// building the calendar) at ~15-25 MB per generation. Without a cap, a
+	// legitimate window=90d x every-minute CronJob yields ~130k events
+	// (~31 MB serialized, 180-290 MB peak heap), which OOMKills the manager
+	// under its memory limit. The cap leaves ample headroom for low-to-medium
+	// frequency schedules (e.g. hourly x window=90d only yields ~2.2k events),
+	// while extreme combinations such as an every-minute schedule hit the cap
+	// and are truncated (window=7d alone already produces ~10,080 firings;
+	// see the sizing table in README.md).
+	MaxEventsPerFeed = 10000
 )
 
 // CronJobInfo holds the information extracted from a CronJob needed to generate
@@ -62,10 +78,18 @@ type ParseWarning struct {
 
 // GenerateResult contains the generated iCal data and any warnings.
 type GenerateResult struct {
-	// ICalData is the serialized iCalendar content.
-	ICalData string
+	// ICalData is the serialized iCalendar content. It is produced directly
+	// from the serializer's output buffer (no intermediate string), so callers
+	// may take ownership of the slice without an extra copy.
+	ICalData []byte
 	// Warnings contains non-fatal issues encountered during generation.
 	Warnings []ParseWarning
+	// EventCount is the number of VEVENTs contained in ICalData.
+	EventCount int
+	// Truncated reports whether enumeration was cut short because
+	// MaxEventsPerFeed was reached. When true, events beyond the cap are
+	// missing from ICalData and EventCount equals MaxEventsPerFeed.
+	Truncated bool
 }
 
 // ParseDurationLabel parses the duration label value. If the value is empty or
@@ -88,7 +112,17 @@ func ParseDurationLabel(labelValue string, defaultDuration time.Duration) (time.
 
 // GenerateFeed creates an iCalendar feed from the given CronJob information.
 // It generates VEVENTs for each scheduled firing within the time window
-// [now, now+windowDays). The now parameter is used as the reference time.
+// [now, now+windowDays). The now parameter is used as the reference time,
+// including for DTSTAMP, so callers must pass a stable (e.g. truncated)
+// generation time: identical inputs always produce byte-identical output.
+// This determinism is what allows the controller to detect "no content
+// change" and skip redundant status updates. Callers should truncate now to
+// a coarse granularity (see requeueInterval in internal/controller).
+//
+// Enumeration stops at MaxEventsPerFeed events (result.Truncated reports
+// whether the cap was hit). Jobs are visited in input order, so once the cap
+// is reached later jobs are dropped entirely; this keeps output deterministic
+// and bounds memory regardless of how many high-frequency jobs match.
 func GenerateFeed(jobs []CronJobInfo, windowDays int, now time.Time) GenerateResult {
 	cal := ics.NewCalendar()
 	cal.SetProductId(productID)
@@ -99,11 +133,14 @@ func GenerateFeed(jobs []CronJobInfo, windowDays int, now time.Time) GenerateRes
 	windowEnd := now.AddDate(0, 0, windowDays)
 
 	var warnings []ParseWarning
+	eventCount := 0
+	truncated := false
 
 	// Support both standard 5-field cron and predefined descriptors (@hourly, @daily, etc.)
 	// as Kubernetes CronJob accepts both formats.
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
 
+jobLoop:
 	for _, job := range jobs {
 		// Determine timezone
 		loc := time.UTC
@@ -139,6 +176,10 @@ func GenerateFeed(jobs []CronJobInfo, windowDays int, now time.Time) GenerateRes
 			if !t.Before(windowEnd) || t.IsZero() {
 				break
 			}
+			if eventCount >= MaxEventsPerFeed {
+				truncated = true
+				break jobLoop
+			}
 
 			// Convert to UTC for iCal
 			startUTC := t.UTC()
@@ -158,11 +199,24 @@ func GenerateFeed(jobs []CronJobInfo, windowDays int, now time.Time) GenerateRes
 			}
 			event.SetDescription(fmt.Sprintf("Namespace: %s\nSchedule: %s\nTimeZone: %s",
 				job.Namespace, job.Schedule, descTZ))
+			eventCount++
 		}
 	}
 
+	// Serialize straight into a byte buffer instead of going through
+	// Serialize()'s string: that avoids allocating an intermediate string
+	// copy of the whole calendar on top of the bytes we hand to the cache
+	// (~31 MB duplicated for an uncapped 90d x every-minute feed). The only
+	// error SerializeTo can report is a write failure from the underlying
+	// writer, which bytes.Buffer never produces — same reasoning as the
+	// library's own Serialize() implementation.
+	var buf bytes.Buffer
+	_ = cal.SerializeTo(&buf)
+
 	return GenerateResult{
-		ICalData: cal.Serialize(),
-		Warnings: warnings,
+		ICalData:   buf.Bytes(),
+		Warnings:   warnings,
+		EventCount: eventCount,
+		Truncated:  truncated,
 	}
 }
