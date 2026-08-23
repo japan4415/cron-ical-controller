@@ -66,6 +66,8 @@ type GenerateResult struct {
 	ICalData string
 	// Warnings contains non-fatal issues encountered during generation.
 	Warnings []ParseWarning
+	// EventCount is the number of VEVENTs contained in ICalData.
+	EventCount int
 }
 
 // ParseDurationLabel parses the duration label value. If the value is empty or
@@ -88,7 +90,12 @@ func ParseDurationLabel(labelValue string, defaultDuration time.Duration) (time.
 
 // GenerateFeed creates an iCalendar feed from the given CronJob information.
 // It generates VEVENTs for each scheduled firing within the time window
-// [now, now+windowDays). The now parameter is used as the reference time.
+// [now, now+windowDays). The now parameter is used as the reference time,
+// including for DTSTAMP, so callers must pass a stable (e.g. truncated)
+// generation time: identical inputs always produce byte-identical output.
+// This determinism is what allows the controller to detect "no content
+// change" and skip redundant status updates. Callers should truncate now to
+// a coarse granularity (see requeueInterval in internal/controller).
 func GenerateFeed(jobs []CronJobInfo, windowDays int, now time.Time) GenerateResult {
 	cal := ics.NewCalendar()
 	cal.SetProductId(productID)
@@ -99,6 +106,7 @@ func GenerateFeed(jobs []CronJobInfo, windowDays int, now time.Time) GenerateRes
 	windowEnd := now.AddDate(0, 0, windowDays)
 
 	var warnings []ParseWarning
+	eventCount := 0
 
 	// Support both standard 5-field cron and predefined descriptors (@hourly, @daily, etc.)
 	// as Kubernetes CronJob accepts both formats.
@@ -158,11 +166,13 @@ func GenerateFeed(jobs []CronJobInfo, windowDays int, now time.Time) GenerateRes
 			}
 			event.SetDescription(fmt.Sprintf("Namespace: %s\nSchedule: %s\nTimeZone: %s",
 				job.Namespace, job.Schedule, descTZ))
+			eventCount++
 		}
 	}
 
 	return GenerateResult{
-		ICalData: cal.Serialize(),
-		Warnings: warnings,
+		ICalData:   cal.Serialize(),
+		Warnings:   warnings,
+		EventCount: eventCount,
 	}
 }

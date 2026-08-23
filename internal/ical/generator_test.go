@@ -388,3 +388,86 @@ func TestGenerateFeed_EmptyTimeZoneShowsUTC(t *testing.T) {
 		t.Error("expected TimeZone: UTC in DESCRIPTION when timezone is empty")
 	}
 }
+
+func TestGenerateFeed_DeterministicOutput(t *testing.T) {
+	// The controller relies on byte-identical output for equal inputs to skip
+	// no-op status updates. Two generations within the same (truncated)
+	// window must therefore produce exactly the same bytes.
+	now := time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
+	jobs := []CronJobInfo{
+		{
+			Name:      "det-job",
+			Namespace: "default",
+			Schedule:  "0 * * * *",
+			TimeZone:  "Asia/Tokyo",
+			Duration:  30 * time.Minute,
+		},
+	}
+
+	first := GenerateFeed(jobs, 7, now)
+	second := GenerateFeed(jobs, 7, now)
+
+	if first.ICalData != second.ICalData {
+		t.Errorf("expected identical output for identical inputs,\nfirst:\n%s\nsecond:\n%s", first.ICalData, second.ICalData)
+	}
+
+	// DTSTAMP must reflect the passed-in generation time (truncated by the
+	// caller), not wall-clock time.
+	wantDTStamp := "DTSTAMP:20260101T030000Z"
+	if !strings.Contains(first.ICalData, wantDTStamp) {
+		t.Errorf("expected %q in output, got:\n%s", wantDTStamp, first.ICalData)
+	}
+
+	// Advancing the generation window to the next hour must change DTSTAMP,
+	// proving that the timestamp tracks the (rounded) generation time.
+	nextWindow := GenerateFeed(jobs, 7, now.Add(time.Hour))
+	if nextWindow.ICalData == first.ICalData {
+		t.Error("expected output to change when the generation window advances")
+	}
+}
+
+func TestGenerateFeed_EventCount(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name         string
+		jobs         []CronJobInfo
+		windowDays   int
+		wantWarnings int
+	}{
+		{
+			name:       "no jobs yields zero events",
+			jobs:       nil,
+			windowDays: 7,
+		},
+		{
+			name: "single hourly job over one day",
+			jobs: []CronJobInfo{
+				{Name: "hourly-job", Namespace: "default", Schedule: "0 * * * *", Duration: 5 * time.Minute},
+			},
+			windowDays: 1,
+		},
+		{
+			name: "unparseable schedule yields zero events with warning",
+			jobs: []CronJobInfo{
+				{Name: "bad-job", Namespace: "default", Schedule: "invalid cron", Duration: 5 * time.Minute},
+			},
+			windowDays:   7,
+			wantWarnings: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := GenerateFeed(tt.jobs, tt.windowDays, now)
+
+			actualEvents := strings.Count(result.ICalData, "BEGIN:VEVENT")
+			if result.EventCount != actualEvents {
+				t.Errorf("EventCount = %d, but ICalData contains %d VEVENTs", result.EventCount, actualEvents)
+			}
+			if len(result.Warnings) != tt.wantWarnings {
+				t.Errorf("expected %d warnings, got %d", tt.wantWarnings, len(result.Warnings))
+			}
+		})
+	}
+}

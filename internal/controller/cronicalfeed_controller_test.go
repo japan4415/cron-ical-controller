@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -29,6 +30,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	cronicalv1alpha1 "github.com/japan4415/cron-ical-controller/api/v1alpha1"
@@ -327,7 +331,7 @@ var _ = Describe("CronICalFeed Controller", func() {
 			Expect(feed.Status.CronJobCount).To(Equal(int32(2)))
 			Expect(feed.Status.FeedURL).To(Equal(server.FeedPath(feedNamespace, feedName)))
 			Expect(feed.Status.LastGeneratedAt).NotTo(BeNil())
-			Expect(feed.Status.Conditions).To(HaveLen(2))
+			Expect(feed.Status.Conditions).To(HaveLen(3))
 
 			readyCond := findCondition(feed.Status.Conditions, cronicalv1alpha1.ConditionReady)
 			Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
@@ -335,6 +339,204 @@ var _ = Describe("CronICalFeed Controller", func() {
 
 			cronJobsCond := findCondition(feed.Status.Conditions, cronicalv1alpha1.ConditionCronJobsFound)
 			Expect(cronJobsCond.Status).To(Equal(metav1.ConditionTrue))
+
+			degradedCond := findCondition(feed.Status.Conditions, cronicalv1alpha1.ConditionDegraded)
+			Expect(degradedCond).NotTo(BeNil())
+			Expect(degradedCond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(degradedCond.Reason).To(Equal("AsExpected"))
+		})
+	})
+
+	Context("When the generation state repeats across reconciles", func() {
+		var baseTime time.Time
+
+		BeforeEach(func() {
+			baseTime = time.Date(2026, 8, 23, 10, 17, 45, 0, time.UTC)
+			createCronJob(cronJobName, "0 * * * *", nil, nil)
+			createFeed(cronicalv1alpha1.CronICalFeedSpec{
+				Window:          ptr.To[int32](1),
+				DefaultDuration: "10m",
+			})
+			reconciler.NowFunc = func() time.Time { return baseTime }
+		})
+
+		It("should not issue a status update when nothing changed", func() {
+			_, err := doReconcile()
+			Expect(err).NotTo(HaveOccurred())
+
+			var feed cronicalv1alpha1.CronICalFeed
+			Expect(k8sClient.Get(context.Background(), feedKey, &feed)).To(Succeed())
+			resourceVersionAfterFirst := feed.ResourceVersion
+			lastGeneratedAfterFirst := feed.Status.LastGeneratedAt
+			Expect(lastGeneratedAfterFirst).NotTo(BeNil())
+
+			// Second reconcile within the same generation window: identical
+			// inputs must produce identical output and therefore no write.
+			result, err := doReconcile()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(requeueInterval))
+
+			feed = cronicalv1alpha1.CronICalFeed{}
+			Expect(k8sClient.Get(context.Background(), feedKey, &feed)).To(Succeed())
+			Expect(feed.ResourceVersion).To(Equal(resourceVersionAfterFirst),
+				"resourceVersion changed although nothing changed: a status update was issued")
+			Expect(feed.Status.LastGeneratedAt.Time).To(Equal(lastGeneratedAfterFirst.Time))
+		})
+
+		It("should not even issue Status().Update() on a no-change reconcile", func() {
+			// The API server silently drops updates whose resulting object is
+			// byte-identical (no resourceVersion bump), so observing the
+			// resourceVersion alone cannot prove that the reconciler stopped
+			// issuing writes. Wrap the client to count Status().Update() calls
+			// directly.
+			counter := &statusUpdateCounter{Client: k8sClient}
+			countingReconciler := &CronICalFeedReconciler{
+				Client:    counter,
+				Scheme:    k8sClient.Scheme(),
+				FeedCache: feedCache,
+				Recorder:  recorder,
+				NowFunc:   func() time.Time { return baseTime },
+			}
+			reconcileReq := reconcile.Request{NamespacedName: feedKey}
+
+			_, err := countingReconciler.Reconcile(context.Background(), reconcileReq)
+			Expect(err).NotTo(HaveOccurred())
+
+			_, err = countingReconciler.Reconcile(context.Background(), reconcileReq)
+			Expect(err).NotTo(HaveOccurred())
+
+			_, err = countingReconciler.Reconcile(context.Background(), reconcileReq)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(counter.statusUpdates).To(Equal(1),
+				"only the first reconcile must write status; no-change reconciles must skip it")
+		})
+
+		It("should issue a status update when the generation window advances", func() {
+			_, err := doReconcile()
+			Expect(err).NotTo(HaveOccurred())
+
+			var feed cronicalv1alpha1.CronICalFeed
+			Expect(k8sClient.Get(context.Background(), feedKey, &feed)).To(Succeed())
+			resourceVersionAfterFirst := feed.ResourceVersion
+			lastGeneratedAfterFirst := feed.Status.LastGeneratedAt
+
+			// Advance past the next hour boundary: LastGeneratedAt alone moves,
+			// which is allowed to trigger exactly one write per window.
+			reconciler.NowFunc = func() time.Time { return baseTime.Add(requeueInterval + time.Minute) }
+			_, err = doReconcile()
+			Expect(err).NotTo(HaveOccurred())
+
+			feed = cronicalv1alpha1.CronICalFeed{}
+			Expect(k8sClient.Get(context.Background(), feedKey, &feed)).To(Succeed())
+			Expect(feed.ResourceVersion).NotTo(Equal(resourceVersionAfterFirst))
+			Expect(feed.Status.LastGeneratedAt.Time).To(Equal(
+				lastGeneratedAfterFirst.Time.Add(requeueInterval)))
+			// Content metrics stay untouched by the clock advance.
+			Expect(feed.Status.CronJobCount).To(Equal(int32(1)))
+			Expect(feed.Status.EventCount).To(BeNumerically(">", 0))
+		})
+
+		It("should regenerate deterministic bytes within the same window", func() {
+			_, err := doReconcile()
+			Expect(err).NotTo(HaveOccurred())
+
+			feedPath := server.FeedPath(feedNamespace, feedName)
+			dataAfterFirst, ok := feedCache.Get(feedPath)
+			Expect(ok).To(BeTrue())
+
+			_, err = doReconcile()
+			Expect(err).NotTo(HaveOccurred())
+
+			dataAfterSecond, ok := feedCache.Get(feedPath)
+			Expect(ok).To(BeTrue())
+			Expect(dataAfterSecond).To(Equal(dataAfterFirst),
+				"two generations in the same window must be byte-identical (deterministic DTSTAMP)")
+		})
+
+		It("should update eventCount when matched CronJobs change", func() {
+			_, err := doReconcile()
+			Expect(err).NotTo(HaveOccurred())
+
+			var feed cronicalv1alpha1.CronICalFeed
+			Expect(k8sClient.Get(context.Background(), feedKey, &feed)).To(Succeed())
+			resourceVersionAfterFirst := feed.ResourceVersion
+			eventCountAfterFirst := feed.Status.EventCount
+			Expect(eventCountAfterFirst).To(BeNumerically(">", 0))
+
+			// Add another matching CronJob: meaningful change → update.
+			createCronJob("second-cronjob", "30 * * * *", nil, nil)
+			_, err = doReconcile()
+			Expect(err).NotTo(HaveOccurred())
+
+			feed = cronicalv1alpha1.CronICalFeed{}
+			Expect(k8sClient.Get(context.Background(), feedKey, &feed)).To(Succeed())
+			Expect(feed.ResourceVersion).NotTo(Equal(resourceVersionAfterFirst))
+			Expect(feed.Status.CronJobCount).To(Equal(int32(2)))
+			Expect(feed.Status.EventCount).To(BeNumerically(">", eventCountAfterFirst))
+		})
+	})
+
+	Context("With a running manager and GenerationChangedPredicate", func() {
+		const timeout = 20 * time.Second
+		const pollingInterval = 250 * time.Millisecond
+
+		It("should not re-enqueue on its own status updates", func() {
+			By("starting a manager with the controller wired through SetupWithManager")
+			mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+				Scheme:                 k8sClient.Scheme(),
+				Metrics:                metricsserver.Options{BindAddress: "0"},
+				HealthProbeBindAddress: "0",
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			managerCache := server.NewFeedCache()
+			managerReconciler := &CronICalFeedReconciler{
+				Client:    mgr.GetClient(),
+				Scheme:    mgr.GetScheme(),
+				Recorder:  mgr.GetEventRecorderFor("cronicalfeed-controller-test"),
+				FeedCache: managerCache,
+			}
+			Expect(managerReconciler.SetupWithManager(mgr)).To(Succeed())
+
+			mgrCtx, mgrCancel := context.WithCancel(context.Background())
+			defer mgrCancel()
+			go func() {
+				_ = mgr.Start(mgrCtx)
+			}()
+
+			By("creating a CronJob and a CronICalFeed")
+			createCronJob(cronJobName, "0 * * * *", nil, nil)
+			createFeed(cronicalv1alpha1.CronICalFeedSpec{})
+
+			By("waiting for the controller to converge on the initial reconcile")
+			Eventually(func(g Gomega) {
+				feed := &cronicalv1alpha1.CronICalFeed{}
+				g.Expect(k8sClient.Get(context.Background(), feedKey, feed)).To(Succeed())
+				g.Expect(feed.Status.LastGeneratedAt).NotTo(BeNil())
+			}, timeout, pollingInterval).Should(Succeed())
+
+			By("writing an outdated lastGeneratedAt via the status subresource")
+			feed := &cronicalv1alpha1.CronICalFeed{}
+			Expect(k8sClient.Get(context.Background(), feedKey, feed)).To(Succeed())
+			staleTime := metav1.NewTime(time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
+			feed.Status.LastGeneratedAt = &staleTime
+			Expect(k8sClient.Status().Update(context.Background(), feed)).To(Succeed())
+
+			feed = &cronicalv1alpha1.CronICalFeed{}
+			Expect(k8sClient.Get(context.Background(), feedKey, feed)).To(Succeed())
+			resourceVersionAfterTouch := feed.ResourceVersion
+
+			By("verifying that no reconcile is triggered by the status-only event")
+			// A status-only update does not bump metadata.generation, so the
+			// GenerationChangedPredicate must swallow it. If the predicate were
+			// missing, this very write would re-enqueue the object and the
+			// reconciler would restore lastGeneratedAt, changing the RV.
+			Consistently(func(g Gomega) string {
+				current := &cronicalv1alpha1.CronICalFeed{}
+				g.Expect(k8sClient.Get(context.Background(), feedKey, current)).To(Succeed())
+				return current.ResourceVersion
+			}, "3s", pollingInterval).Should(Equal(resourceVersionAfterTouch))
 		})
 	})
 })
@@ -346,4 +548,26 @@ func findCondition(conditions []metav1.Condition, condType string) *metav1.Condi
 		}
 	}
 	return nil
+}
+
+// statusUpdateCounter wraps a client.Client and counts how many times
+// Status().Update() is invoked, so tests can assert that no status write is
+// issued at all.
+type statusUpdateCounter struct {
+	client.Client
+	statusUpdates int
+}
+
+func (c *statusUpdateCounter) Status() client.SubResourceWriter {
+	return &countingStatusWriter{SubResourceWriter: c.Client.Status(), counter: c}
+}
+
+type countingStatusWriter struct {
+	client.SubResourceWriter
+	counter *statusUpdateCounter
+}
+
+func (w *countingStatusWriter) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	w.counter.statusUpdates++
+	return w.SubResourceWriter.Update(ctx, obj, opts...)
 }

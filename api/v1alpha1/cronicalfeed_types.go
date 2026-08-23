@@ -71,6 +71,10 @@ type CronICalFeedStatus struct {
 	// +optional
 	CronJobCount int32 `json:"cronJobCount,omitempty"`
 
+	// eventCount is the number of iCal events contained in the last generated feed.
+	// +optional
+	EventCount int32 `json:"eventCount,omitempty"`
+
 	// feedURL is the HTTP path where this feed is served.
 	// +optional
 	FeedURL string `json:"feedURL,omitempty"`
@@ -80,6 +84,8 @@ type CronICalFeedStatus struct {
 	// Condition types:
 	// - "Ready": the feed is successfully generated and available for serving
 	// - "CronJobsFound": at least one target CronJob was found
+	// - "Degraded": matched CronJobs exist but none of them produced events
+	//   (e.g. all cron expressions failed to parse)
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -92,11 +98,15 @@ const (
 	ConditionReady = "Ready"
 	// ConditionCronJobsFound indicates whether any target CronJobs were found.
 	ConditionCronJobsFound = "CronJobsFound"
+	// ConditionDegraded indicates that matched CronJobs exist but no events
+	// could be generated from them (e.g. every cron expression failed to parse).
+	ConditionDegraded = "Degraded"
 )
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="CronJobs",type=integer,JSONPath=`.status.cronJobCount`,description="Number of matched CronJobs"
+// +kubebuilder:printcolumn:name="Events",type=integer,JSONPath=`.status.eventCount`,description="Number of generated iCal events"
 // +kubebuilder:printcolumn:name="Feed URL",type=string,JSONPath=`.status.feedURL`,description="Feed endpoint path"
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`,description="Whether the feed is ready"
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`

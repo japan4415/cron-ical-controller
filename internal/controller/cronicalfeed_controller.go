@@ -30,9 +30,11 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	cronicalv1alpha1 "github.com/japan4415/cron-ical-controller/api/v1alpha1"
@@ -52,6 +54,19 @@ type CronICalFeedReconciler struct {
 	Scheme    *runtime.Scheme
 	Recorder  record.EventRecorder
 	FeedCache *server.FeedCache
+
+	// NowFunc returns the reference time used for feed generation. When nil,
+	// time.Now is used. Injected in tests to make generation windows deterministic.
+	NowFunc func() time.Time
+}
+
+// now returns the current generation reference time, honoring an injectable
+// clock for tests.
+func (r *CronICalFeedReconciler) now() time.Time {
+	if r.NowFunc != nil {
+		return r.NowFunc()
+	}
+	return time.Now()
 }
 
 // +kubebuilder:rbac:groups=cron-ical.discord.jp,resources=cronicalfeeds,verbs=get;list;watch;create;update;patch;delete
@@ -109,6 +124,7 @@ func (r *CronICalFeedReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	cronJobs, err := r.listCronJobs(ctx, &feed)
 	if err != nil {
 		log.Error(err, "failed to list CronJobs")
+		prevConditions := append([]metav1.Condition(nil), feed.Status.Conditions...)
 		meta.SetStatusCondition(&feed.Status.Conditions, metav1.Condition{
 			Type:               cronicalv1alpha1.ConditionReady,
 			Status:             metav1.ConditionFalse,
@@ -123,8 +139,13 @@ func (r *CronICalFeedReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			Reason:             "ListFailed",
 			Message:            fmt.Sprintf("Unable to determine CronJob count: %v", err),
 		})
-		if statusErr := r.Status().Update(ctx, &feed); statusErr != nil {
-			log.Error(statusErr, "failed to update status")
+		// Only write the status when the conditions actually changed; repeated
+		// failures with an identical error would otherwise keep generating
+		// watch events for our own object.
+		if !conditionsEquivalent(prevConditions, feed.Status.Conditions) {
+			if statusErr := r.Status().Update(ctx, &feed); statusErr != nil {
+				log.Error(statusErr, "failed to update status")
+			}
 		}
 		return ctrl.Result{}, err
 	}
@@ -162,7 +183,12 @@ func (r *CronICalFeedReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// 5. Generate iCal feed
-	now := time.Now()
+	// Truncate the generation time to the requeue interval so that both the
+	// generated calendar bytes (DTSTAMP) and LastGeneratedAt stay constant
+	// within a generation window. This keeps the feed byte-for-byte
+	// deterministic across reconciles in the same window, which is what makes
+	// the no-op status update skip below effective.
+	now := truncateGenerationTime(r.now())
 	result := ical.GenerateFeed(jobInfos, windowDays, now)
 
 	// Record warnings from generation
@@ -175,10 +201,18 @@ func (r *CronICalFeedReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	feedPath := server.FeedPath(feed.Namespace, feed.Name)
 	r.FeedCache.Set(feedPath, []byte(result.ICalData))
 
-	// 7. Update status
+	// 7. Update status only when the observed state meaningfully changed.
+	// An unconditional update would emit a watch event for our own object on
+	// every reconcile (extra etcd writes, and before GenerationChangedPredicate
+	// existed, a self-induced reconcile loop). LastGeneratedAt alone never
+	// triggers a write because it is truncated to the requeue interval: within
+	// one generation window it does not change.
+	prevStatus := feed.Status.DeepCopy()
+
 	nowMeta := metav1.NewTime(now)
 	feed.Status.LastGeneratedAt = &nowMeta
 	feed.Status.CronJobCount = int32(len(cronJobs))
+	feed.Status.EventCount = int32(result.EventCount)
 	feed.Status.FeedURL = feedPath
 
 	// Set conditions
@@ -201,21 +235,113 @@ func (r *CronICalFeedReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		Status:             metav1.ConditionTrue,
 		ObservedGeneration: feed.Generation,
 		Reason:             "FeedGenerated",
-		Message:            fmt.Sprintf("Feed generated with %d CronJob(s)", len(cronJobs)),
+		Message: fmt.Sprintf("Feed generated with %d event(s) from %d CronJob(s)",
+			result.EventCount, len(cronJobs)),
 	})
 
-	if err := r.Status().Update(ctx, &feed); err != nil {
-		log.Error(err, "failed to update CronICalFeed status")
-		return ctrl.Result{}, err
+	// Degraded flags the (defensive) case where CronJobs matched but none of
+	// them produced events. The API server validates cron expressions at
+	// admission time, so reaching this state should be nearly impossible; it
+	// exists so that such failures are observable via status instead of being
+	// silently served as an empty calendar.
+	degradedStatus := metav1.ConditionFalse
+	degradedReason := "AsExpected"
+	var degradedMessage string
+	switch {
+	case len(cronJobs) > 0 && result.EventCount == 0 && len(result.Warnings) > 0:
+		degradedStatus = metav1.ConditionTrue
+		degradedReason = "CronJobsUnparseable"
+		degradedMessage = fmt.Sprintf("%d CronJob(s) matched but no events were generated; see generation warning events",
+			len(cronJobs))
+	case result.EventCount > 0:
+		degradedMessage = fmt.Sprintf("Generated %d event(s)", result.EventCount)
+	case len(cronJobs) == 0:
+		degradedMessage = "No CronJobs matched the selector"
+	default:
+		degradedMessage = "Matched CronJob(s) produced no events within the window"
+	}
+	meta.SetStatusCondition(&feed.Status.Conditions, metav1.Condition{
+		Type:               cronicalv1alpha1.ConditionDegraded,
+		Status:             degradedStatus,
+		ObservedGeneration: feed.Generation,
+		Reason:             degradedReason,
+		Message:            degradedMessage,
+	})
+
+	if !statusEquivalent(prevStatus, &feed.Status) {
+		if err := r.Status().Update(ctx, &feed); err != nil {
+			log.Error(err, "failed to update CronICalFeed status")
+			return ctrl.Result{}, err
+		}
+	} else {
+		log.V(1).Info("status unchanged; skipping status update",
+			"cronJobCount", len(cronJobs),
+			"eventCount", result.EventCount,
+		)
 	}
 
 	log.Info("Reconcile complete",
 		"cronJobCount", len(cronJobs),
+		"eventCount", result.EventCount,
 		"feedPath", feedPath,
 		"windowDays", windowDays,
 	)
 
 	return ctrl.Result{RequeueAfter: requeueInterval}, nil
+}
+
+// truncateGenerationTime rounds t down to the requeueInterval boundary so that
+// the generation reference time only advances once per interval. The rounding
+// is anchored to UTC hour boundaries for the default 1h interval.
+func truncateGenerationTime(t time.Time) time.Time {
+	return t.Truncate(requeueInterval)
+}
+
+// statusEquivalent reports whether two status snapshots are equivalent for
+// the purpose of deciding whether to persist an update. LastTransitionTime is
+// deliberately ignored: it is managed by meta.SetStatusCondition and must not
+// influence the comparison.
+func statusEquivalent(a, b *cronicalv1alpha1.CronICalFeedStatus) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if !generationTimesEqual(a.LastGeneratedAt, b.LastGeneratedAt) {
+		return false
+	}
+	if a.CronJobCount != b.CronJobCount ||
+		a.EventCount != b.EventCount ||
+		a.FeedURL != b.FeedURL {
+		return false
+	}
+	return conditionsEquivalent(a.Conditions, b.Conditions)
+}
+
+// generationTimesEqual compares optional timestamps by instant. Sub-second
+// precision is irrelevant here because generation times are truncated before
+// being stored.
+func generationTimesEqual(a, b *metav1.Time) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Time.Equal(b.Time)
+}
+
+// conditionsEquivalent compares condition lists field by field, ignoring
+// LastTransitionTime.
+func conditionsEquivalent(a, b []metav1.Condition) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Type != b[i].Type ||
+			a[i].Status != b[i].Status ||
+			a[i].Reason != b[i].Reason ||
+			a[i].Message != b[i].Message ||
+			a[i].ObservedGeneration != b[i].ObservedGeneration {
+			return false
+		}
+	}
+	return true
 }
 
 // listCronJobs lists CronJobs matching the feed's selector.
@@ -255,7 +381,11 @@ func (r *CronICalFeedReconciler) listCronJobs(ctx context.Context, feed *cronica
 // SetupWithManager sets up the controller with the Manager.
 func (r *CronICalFeedReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&cronicalv1alpha1.CronICalFeed{}).
+		For(&cronicalv1alpha1.CronICalFeed{},
+			// Ignore update events that only touch status/metadata. Status
+			// writes by this very reconciler bump the resourceVersion, which
+			// would otherwise re-enqueue us in a self-induced reconcile loop.
+			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&batchv1.CronJob{}, handler.EnqueueRequestsFromMapFunc(r.mapCronJobToFeeds)).
 		Named("cronicalfeed").
 		Complete(r)
