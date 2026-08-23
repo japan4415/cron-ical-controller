@@ -40,8 +40,9 @@ CronJobs; events beyond the cap are not served.
 
 All generated feeds are held in an in-memory cache capped at 64 MiB total.
 When the budget would be exceeded, the least-recently-updated feeds are evicted
-first (they will be regenerated on the next reconcile). At most ~2.4 MB per
-feed, this holds ~26 worst-case feeds or hundreds of typically sized ones.
+first; until their next reconcile (at most requeueInterval=1h later), those
+paths return 404 rather than stale data. At most ~2.4 MB per feed, this holds
+~26 worst-case feeds or hundreds of typically sized ones.
 
 ### Manager memory settings
 

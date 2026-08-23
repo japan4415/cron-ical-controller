@@ -43,9 +43,11 @@ const (
 	// building the calendar) at ~15-25 MB per generation. Without a cap, a
 	// legitimate window=90d x every-minute CronJob yields ~130k events
 	// (~31 MB serialized, 180-290 MB peak heap), which OOMKills the manager
-	// under its memory limit. 10k events still covers the default
-	// configuration (window=7d) with a wide margin: even an every-minute
-	// schedule only produces ~10k firings over 7 days.
+	// under its memory limit. The cap leaves ample headroom for low-to-medium
+	// frequency schedules (e.g. hourly x window=90d only yields ~2.2k events),
+	// while extreme combinations such as an every-minute schedule hit the cap
+	// and are truncated (window=7d alone already produces ~10,080 firings;
+	// see the sizing table in README.md).
 	MaxEventsPerFeed = 10000
 )
 
