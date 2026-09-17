@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/arran4/golang-ical v0.3.5
-	github.com/onsi/ginkgo/v2 v2.32.1
+	github.com/onsi/ginkgo/v2 v2.33.0
 	github.com/onsi/gomega v1.40.0
 	github.com/robfig/cron/v3 v3.0.1
 	k8s.io/api v0.36.3
